@@ -1,116 +1,93 @@
-const express = require("express");
-const https = require("https");
+import express from "express";
+
+import https from "https";
+
+import fs from "fs";
+
+import fetch from "node-fetch";
+
 const app = express();
 
 app.use(express.json());
 
-const PROXY_SECRET = process.env.PROXY_SECRET || "";
+const agent = new https.Agent({
 
-function auth(req, res, next) {
-  const token = (req.headers.authorization || "").replace("Bearer ", "");
-  if (!PROXY_SECRET || token !== PROXY_SECRET) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-}
+  cert: process.env.EFI_CERTIFICATE_PEM,
 
-function getCerts() {
-  const cert = (process.env.EFI_CERTIFICATE_PEM || "").replace(/\\n/g, "\n");
-  const key = (process.env.EFI_CERTIFICATE_KEY || "").replace(/\\n/g, "\n");
-  if (!cert || !key) throw new Error("Certificados Efi nao configurados");
-  return { cert, key };
-}
+  key: process.env.EFI_CERTIFICATE_KEY,
 
-function efiRequest(method, path, headers, body) {
-  return new Promise((resolve, reject) => {
-    const { cert, key } = getCerts();
-    const url = new URL(path, "https://pix.api.efipay.com.br");
-    const opts = {
-      method,
-      hostname: url.hostname,
-      path: url.pathname + url.search,
-      port: 443,
-      headers,
-      cert,
-      key,
-      rejectUnauthorized: true,
-    };
-    const req = https.request(opts, (res) => {
-      let data = "";
-      res.on("data", (c) => (data += c));
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+});
+
+app.post("/create-pix", async (req, res) => {
+
+  try {
+
+    const tokenResponse = await fetch("https://pix.api.efipay.com.br/oauth/token", {
+
+      method: "POST",
+
+      headers: {
+
+        Authorization:
+
+          "Basic " +
+
+          Buffer.from(
+
+            process.env.EFI_CLIENT_ID + ":" + process.env.EFI_CLIENT_SECRET
+
+          ).toString("base64"),
+
+        "Content-Type": "application/json",
+
+      },
+
+      body: JSON.stringify({ grant_type: "client_credentials" }),
+
+      agent,
+
     });
-    req.on("error", reject);
-    if (body) req.write(typeof body === "string" ? body : JSON.stringify(body));
-    req.end();
-  });
-}
 
-async function getAccessToken() {
-  const clientId = process.env.EFI_CLIENT_ID;
-  const clientSecret = process.env.EFI_CLIENT_SECRET;
-  const creds = Buffer.from(clientId + ":" + clientSecret).toString("base64");
+    const tokenData = await tokenResponse.json();
 
-  const res = await efiRequest("POST", "/oauth/token", {
-    "Content-Type": "application/json",
-    Authorization: "Basic " + creds,
-  }, JSON.stringify({ grant_type: "client_credentials" }));
+    const accessToken = tokenData.access_token;
 
-  if (res.status !== 200) {
-    throw new Error("Efi OAuth failed: " + res.status + " " + res.body);
-  }
-  return JSON.parse(res.body).access_token;
-}
+    const pixResponse = await fetch(
 
-app.get("/health", function(req, res) {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
-});
+      "https://pix.api.efipay.com.br/v2/cob",
 
-app.post("/oauth/token", auth, async function(req, res) {
-  try {
-    const token = await getAccessToken();
-    res.json({ access_token: token });
-  } catch (e) {
-    console.error("OAuth error:", e.message);
-    res.status(502).json({ error: e.message });
-  }
-});
+      {
 
-app.post("/create-charge", auth, async function(req, res) {
-  try {
-    const accessToken = await getAccessToken();
-    const cobBody = JSON.stringify(req.body);
+        method: "POST",
 
-    const cobRes = await efiRequest("POST", "/v2/cob", {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + accessToken,
-    }, cobBody);
+        headers: {
 
-    const cobData = JSON.parse(cobRes.body);
+          Authorization: `Bearer ${accessToken}`,
 
-    if (cobData.loc && cobData.loc.id && !cobData.pixCopiaECola) {
-      try {
-        const qrRes = await efiRequest("GET", "/v2/loc/" + cobData.loc.id + "/qrcode", {
-          Authorization: "Bearer " + accessToken,
-        });
-        if (qrRes.status === 200) {
-          const qrData = JSON.parse(qrRes.body);
-          cobData.qrcode = qrData.qrcode;
-          cobData.imagemQrcode = qrData.imagemQrcode;
-        }
-      } catch (e) {
-        console.error("QR fetch error:", e.message);
+          "Content-Type": "application/json",
+
+        },
+
+        body: JSON.stringify(req.body),
+
+        agent,
+
       }
-    }
 
-    res.status(cobRes.status).json(cobData);
-  } catch (e) {
-    console.error("Create charge error:", e.message);
-    res.status(502).json({ error: e.message });
+    );
+
+    const data = await pixResponse.json();
+
+    res.json(data);
+
+  } catch (err) {
+
+    console.error(err);
+
+    res.status(500).json({ error: "Erro ao criar Pix" });
+
   }
+
 });
 
-var PORT = process.env.PORT || 3000;
-app.listen(PORT, function() {
-  console.log("Efi mTLS proxy listening on port " + PORT);
-});
+app.listen(3000, () => console.log("Proxy rodando na porta 3000"));
