@@ -179,6 +179,28 @@ app.post("/webhook/efi/pix", async (req, res) => {
   await forwardToSupabase(req.body, res);
 });
 
+// ── Check PIX status by txid ──
+app.get("/check-pix/:txid", async (req, res) => {
+  try {
+    const { txid } = req.params;
+    if (!txid) return res.status(400).json({ error: "txid is required" });
+
+    const accessToken = await getAccessToken();
+    const response = await makeRequest("https://pix.api.efipay.com.br/v2/cob/" + txid, {
+      method: "GET",
+      headers: { Authorization: "Bearer " + accessToken },
+      agent,
+    });
+
+    const data = JSON.parse(response.body);
+    console.log("Check pix status for txid:", txid, "->", data.status);
+    res.json({ status: data.status, txid, raw: data });
+  } catch (err) {
+    console.error("check-pix error:", err.message || err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 // ── Register webhook ──
 app.post("/register-webhook", async (req, res) => {
   try {
