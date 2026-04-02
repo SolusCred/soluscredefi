@@ -9,8 +9,6 @@ const cert = (process.env.EFI_CERTIFICATE_PEM || "").replace(/\\n/g, "\n");
 const key = (process.env.EFI_CERTIFICATE_KEY || "").replace(/\\n/g, "\n");
 
 console.log("Cert length:", cert.length, "| Key length:", key.length);
-console.log("Cert starts with:", cert.substring(0, 30));
-console.log("Key starts with:", key.substring(0, 30));
 
 let agent = null;
 try {
@@ -18,13 +16,12 @@ try {
     agent = new https.Agent({ cert, key });
     console.log("mTLS Agent created successfully");
   } else {
-    console.warn("WARNING: Certificate or Key is empty — mTLS agent NOT created");
+    console.warn("WARNING: Certificate or Key is empty");
   }
 } catch (err) {
   console.error("FATAL: Failed to create mTLS Agent:", err.message);
 }
 
-// Health check
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -38,13 +35,11 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// Get OAuth token helper
 async function getAccessToken() {
-  if (!agent) throw new Error("mTLS agent not available — check certificates");
+  if (!agent) throw new Error("mTLS agent not available");
   if (!process.env.EFI_CLIENT_ID || !process.env.EFI_CLIENT_SECRET) {
     throw new Error("EFI_CLIENT_ID or EFI_CLIENT_SECRET not set");
   }
-
   const tokenResponse = await fetch("https://pix.api.efipay.com.br/oauth/token", {
     method: "POST",
     headers: {
@@ -54,18 +49,15 @@ async function getAccessToken() {
     body: JSON.stringify({ grant_type: "client_credentials" }),
     agent,
   });
-
   const tokenData = await tokenResponse.json();
-  if (!tokenData.access_token) throw new Error("Failed to get access token: " + JSON.stringify(tokenData));
+  if (!tokenData.access_token) throw new Error("Failed to get token: " + JSON.stringify(tokenData));
   return tokenData.access_token;
 }
 
-// Create PIX charge
 app.post("/create-pix", async (req, res) => {
   try {
     console.log("POST /create-pix body:", JSON.stringify(req.body));
     const accessToken = await getAccessToken();
-
     const pixResponse = await fetch("https://pix.api.efipay.com.br/v2/cob", {
       method: "POST",
       headers: {
@@ -75,11 +67,8 @@ app.post("/create-pix", async (req, res) => {
       body: JSON.stringify(req.body),
       agent,
     });
-
     const data = await pixResponse.json();
-    console.log("Efí /v2/cob response:", pixResponse.status, JSON.stringify(data));
-
-    // If charge created, also get QR code
+    console.log("Efi /v2/cob response:", pixResponse.status);
     if (data.loc?.id) {
       try {
         const qrRes = await fetch(`https://pix.api.efipay.com.br/v2/loc/${data.loc.id}/qrcode`, {
@@ -91,12 +80,10 @@ app.post("/create-pix", async (req, res) => {
         data.qrcode = qrData.qrcode;
         data.imagemQrcode = qrData.imagemQrcode;
         data.pixCopiaECola = qrData.qrcode;
-        console.log("QR code fetched for loc:", data.loc.id);
       } catch (qrErr) {
         console.error("QR code fetch error:", qrErr.message);
       }
     }
-
     res.json(data);
   } catch (err) {
     console.error("create-pix error:", err.message || err);
@@ -104,27 +91,20 @@ app.post("/create-pix", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════
-// WEBHOOK ENDPOINTS
-// ══════════════════════════════════════════════════════════════
-
 async function forwardToSupabase(body, res) {
   try {
     console.log("Forwarding to pix-webhook:", JSON.stringify(body));
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-
     if (!supabaseUrl || !supabaseAnonKey) {
       console.error("SUPABASE_URL or SUPABASE_ANON_KEY not configured");
       return res.status(200).end();
     }
-
     const forwardRes = await fetch(`${supabaseUrl}/functions/v1/pix-webhook`, {
       method: "POST",
       headers: { "Content-Type": "application/json", apikey: supabaseAnonKey },
       body: JSON.stringify(body),
     });
-
     const forwardText = await forwardRes.text();
     console.log("pix-webhook response:", forwardRes.status, forwardText);
     res.status(200).end();
@@ -135,34 +115,29 @@ async function forwardToSupabase(body, res) {
 }
 
 app.get("/webhook/efi", (req, res) => {
-  console.log("Efí webhook handshake GET");
+  console.log("Efi webhook handshake GET");
   res.status(200).end();
 });
 
 app.post("/webhook/efi", async (req, res) => {
-  console.log("Efí webhook POST /webhook/efi:", JSON.stringify(req.body));
+  console.log("Efi webhook POST /webhook/efi:", JSON.stringify(req.body));
   await forwardToSupabase(req.body, res);
 });
 
 app.post("/webhook/efi/pix", async (req, res) => {
-  console.log("Efí webhook POST /webhook/efi/pix:", JSON.stringify(req.body));
+  console.log("Efi webhook POST /webhook/efi/pix:", JSON.stringify(req.body));
   await forwardToSupabase(req.body, res);
 });
 
-// Register webhook
 app.post("/register-webhook", async (req, res) => {
   try {
     let { webhookUrl } = req.body;
     if (!webhookUrl) return res.status(400).json({ error: "webhookUrl is required" });
-
     const pixKey = process.env.EFI_PIX_KEY;
     if (!pixKey) return res.status(500).json({ error: "EFI_PIX_KEY not configured" });
-
     if (!webhookUrl.includes("?")) webhookUrl += "?ignorar=";
-
     console.log("Registering webhook:", pixKey, webhookUrl);
     const accessToken = await getAccessToken();
-
     const response = await fetch(`https://pix.api.efipay.com.br/v2/webhook/${encodeURIComponent(pixKey)}`, {
       method: "PUT",
       headers: {
@@ -173,7 +148,6 @@ app.post("/register-webhook", async (req, res) => {
       body: JSON.stringify({ webhookUrl }),
       agent,
     });
-
     const text = await response.text();
     console.log("Webhook registration:", response.status, text);
     res.status(response.status).type("application/json").send(text);
@@ -183,12 +157,10 @@ app.post("/register-webhook", async (req, res) => {
   }
 });
 
-// List webhook
 app.get("/list-webhooks", async (req, res) => {
   try {
     const pixKey = process.env.EFI_PIX_KEY;
     if (!pixKey) return res.status(500).json({ error: "EFI_PIX_KEY not configured" });
-
     const accessToken = await getAccessToken();
     const response = await fetch(`https://pix.api.efipay.com.br/v2/webhook/${encodeURIComponent(pixKey)}`, {
       method: "GET",
@@ -202,7 +174,6 @@ app.get("/list-webhooks", async (req, res) => {
   }
 });
 
-// Catch-all for debugging
 app.use((req, res) => {
   console.log("Unhandled route:", req.method, req.url);
   res.status(404).json({ error: "Not found", path: req.url, method: req.method });
